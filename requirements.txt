@@ -1,0 +1,5 @@
+uvicorn
+fastapi
+python-multipart
+jinja2
+serverchan-sdk
