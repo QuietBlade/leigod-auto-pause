@@ -21,6 +21,10 @@ ENV WARNING_THRESHOLD_MINUTES=720
 ENV PAUSE_THRESHOLD_MINUTES=1440
  # 定时器间隔 30分钟
 ENV CHECK_INTERVAL_MINUTES=30
-
+ENV TZ=Asia/Shanghai
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"]
+
+# docker build -t yuanzhangzcc/leigod-auto-pause:v2.2.5 -t yuanzhangzcc/leigod-auto-pause:latest .
+# docker push yuanzhangzcc/leigod-auto-pause:v2.2.5
+# docker push yuanzhangzcc/leigod-auto-pause:latest
