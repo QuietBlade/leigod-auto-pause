@@ -8,5 +8,6 @@ services:
       - "8000:8000"
     environment:
       - token="YOUR_LEIGOD_TOKEN_HERE" 
-      - serverchan_sendkey="YOUR_SERVERCHAN_SENDKEY_HERE" 
+      - serverchan_sendkey="YOUR_SERVERCHAN_SENDKEY_HERE"
+      - TZ=Asia/Shanghai
     restart: always
