@@ -6,7 +6,7 @@ import os
 
 class legod(object):
     def __init__(self, token = ""):
-        self.version = "v2.2.4"
+        self.version = "v2.2.5"
         self.pause_url = "https://webapi.leigod.com/api/user/pause"
         self.info_url = "https://webapi.leigod.com/api/user/info"
         self.usage_detail_url = "https://webapi.leigod.com/api/user/time/log"
@@ -107,9 +107,9 @@ class legod(object):
                 msg = "未知错误，可能是请求频繁或者是网址更新"
                 return False, msg
             res = json.loads(response.text)
-            print("暂停结果：", res["msg"])
             if res["code"] == 0:
                 self.stopp = True 
+                self.notify("账号已成功暂停")
                 return True, res["msg"]
             elif res["code"] == 400006:
                 self.update_token("")

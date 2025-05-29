@@ -25,10 +25,6 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-app = FastAPI() # FastAPI 实例现在在 lifespan 函数之后创建，以正确应用 lifespan
-
-templates = Jinja2Templates(directory="templates")
-
 # --- 新增：脱敏 Token 的函数 ---
 def mask_token(token: str, visible_chars: int = 6) -> str:
     """
@@ -49,10 +45,11 @@ class AppState:
         self.last_update_time: str = self.get_current_time() if self.current_token else "从未更新"
         self.nickname: str = ""
         self.status_message: str = "服务启动中..."
-        self.usage_records: List[Dict] = [] # 新增：用于存储使用明细记录
+        self.usage_records: List[Dict] = [] 
         self.usage_timer: Optional[threading.Timer] = None
-        # legod 实例现在会处理通知逻辑，其内部也使用了 logger
-        self.leigod_obj = legod.legod(token=self.current_token) 
+        self.leigod_obj = legod.legod(token=self.current_token)
+        # 新增：用于跟踪上一次定时器检测时账号是否为暂停状态
+        self.is_last_known_state_paused: Optional[bool] = None # True: paused, False: accelerating, None: undetermined
     
     @staticmethod
     def get_current_time() -> str:
@@ -63,42 +60,98 @@ def check_usage_details_task():
 
     if not state.current_token:
         logger.warning("定时任务：Token 无效，停止定时检查。")
-        stop_usage_timer()
+        stop_usage_timer() # Ensure timer stops if token becomes invalid
         return
 
-    # 获取完整的 usage_details 信息
-    success, message, duration_minutes, full_data = state.leigod_obj.get_usage_details_and_full_data() # 调用新的方法
+    success, message, duration_minutes, full_data = state.leigod_obj.get_usage_details_and_full_data()
+
+    current_is_determined_to_be_paused: Optional[bool] = None
 
     if success:
-        logger.info(f"定时任务：使用明细检查结果: {message}")
-        pause_minutes = int(os.getenv("PAUSE_THRESHOLD_MINUTES", "1440"))
-        warning_minutes = int(os.getenv("WARNING_THRESHOLD_MINUTES", "1440"))
-        if duration_minutes > pause_minutes:
-            state.leigod_obj.notify(f"账号已加速{pause_minutes}分钟并尝试自动暂停: {message}") 
-            pause_success, pause_msg = state.leigod_obj.pause()
-            logger.info(f"定时任务：自动暂停{'成功' if pause_success else '失败'}: {pause_msg}")
-        elif duration_minutes > warning_minutes:
-            state.leigod_obj.notify(f"账号已加速超过{warning_minutes}分钟: {message}")
+        # Determine current pause state primarily from the message
+        if "已暂停状态" in message:
+            current_is_determined_to_be_paused = True
+        elif "未暂停状态" in message: # Covers "未暂停状态" and "最新记录为恢复状态，但未找到恢复时间"
+            current_is_determined_to_be_paused = False
+        elif full_data and 'list' in full_data and full_data['list']: # Fallback if message is not clear
+            latest_record = full_data['list'][0]
+            pause_time = latest_record.get('pause_time')
+            recover_time = latest_record.get('recover_time')
+            if pause_time and (not recover_time or pause_time >= recover_time):
+                current_is_determined_to_be_paused = True
+            elif recover_time and (not pause_time or recover_time > pause_time):
+                current_is_determined_to_be_paused = False
+            elif duration_minutes > 0 : # If time has elapsed and not clearly paused/recovered by times
+                 current_is_determined_to_be_paused = False
+        # If message was "未获取到使用明细数据。", full_data['list'] would be empty, current_is_determined_to_be_paused remains None.
+
+        if current_is_determined_to_be_paused is not None:
+            if state.is_last_known_state_paused is True and current_is_determined_to_be_paused is False:
+                notification_message = f"检测到状态从暂停变为加速, 请确认是本人操作"
+                state.leigod_obj.notify(notification_message)
+            
+            state.is_last_known_state_paused = current_is_determined_to_be_paused # Update state for next check
+
+        # Original auto-pause logic
+        pause_minutes_env = os.getenv("PAUSE_THRESHOLD_MINUTES")
+        warning_minutes_env = os.getenv("WARNING_THRESHOLD_MINUTES")
+
+        # Ensure values from env are valid integers, otherwise use defaults or skip
+        try:
+            pause_threshold_minutes = int(pause_minutes_env) if pause_minutes_env is not None else 1440 # Default 24h
+        except ValueError:
+            logger.warning(f"无效的 PAUSE_THRESHOLD_MINUTES值: {pause_minutes_env}，将使用默认值或不触发自动暂停。")
+            pause_threshold_minutes = float('inf') # Effectively disable if invalid
+
+        try:
+            warning_threshold_minutes = int(warning_minutes_env) if warning_minutes_env is not None else 1440 # Default 24h
+        except ValueError:
+            logger.warning(f"无效的 WARNING_THRESHOLD_MINUTES值: {warning_minutes_env}，将使用默认值或不触发警告。")
+            warning_threshold_minutes = float('inf') # Effectively disable if invalid
+
+        if current_is_determined_to_be_paused is False: # Only consider auto-pause if currently accelerating
+            if duration_minutes > pause_threshold_minutes:
+                state.leigod_obj.notify(f"账号已加速超过 {pause_threshold_minutes} 分钟并尝试自动暂停: {message}")
+                pause_success, pause_msg = state.leigod_obj.pause()
+                logger.info(f"定时任务：自动暂停{'成功' if pause_success else '失败'}: {pause_msg}")
+                if pause_success:
+                    state.is_last_known_state_paused = True # Update state immediately after successful pause
+            elif duration_minutes > warning_threshold_minutes:
+                state.leigod_obj.notify(f"账号已加速超过 {warning_threshold_minutes} 分钟: {message}")
         
-        # 更新 usage_records
         if full_data and 'list' in full_data:
-            state.usage_records = full_data['list'] # 将使用明细列表保存到 state
+            state.usage_records = full_data['list']
         else:
-            state.usage_records = [] # 如果没有数据，清空记录
-            logger.info("定时任务：未获取到使用明细列表，记录已清空。")
-    else:
+            state.usage_records = []
+            if success: # Only log if API call was successful but no list data
+                 logger.info("定时任务：未获取到使用明细列表，记录已清空。")
+
+    else: # get_usage_details_and_full_data failed
         logger.error(f"定时任务：获取使用明细失败: {message}")
-        state.usage_records = [] # 获取失败也清空记录
+        state.usage_records = []
+        # Do not change state.is_last_known_state_paused if API call fails, keep last known state.
+        logger.info(f"定时任务：获取使用明细失败，上次记录的暂停状态 ({state.is_last_known_state_paused}) 将保持不变。")
+
 
 def start_usage_timer():
-    stop_usage_timer() # 确保在启动前停止任何现有计时器
+    stop_usage_timer() 
     
     if app.state.current_token:
-        check_usage_details_task() # 立即执行一次
-        interval = int(os.getenv("CHECK_INTERVAL_MINUTES", "60"))
+        check_usage_details_task() 
+        interval_env = os.getenv("CHECK_INTERVAL_MINUTES", "60")
+        try:
+            interval = int(interval_env)
+            if interval <= 0:
+                interval = 60 # Default to 60 if non-positive
+                logger.warning(f"CHECK_INTERVAL_MINUTES 值 ({interval_env}) 无效，已重置为60分钟。")
+        except ValueError:
+            interval = 60 # Default to 60 if not a valid integer
+            logger.warning(f"CHECK_INTERVAL_MINUTES 值 ({interval_env}) 无效，已重置为60分钟。")
+
         app.state.usage_timer = threading.Timer(interval * 60, start_usage_timer)
-        app.state.usage_timer.daemon = True # 设置为守护线程，以便在主程序退出时自动终止
+        app.state.usage_timer.daemon = True
         app.state.usage_timer.start()
+        logger.info(f"定时检查任务已启动，间隔: {interval} 分钟。")
     else:
         logger.info("Token 为空，未启动定时检查任务。")
 
@@ -106,70 +159,97 @@ def stop_usage_timer():
     if app.state.usage_timer and app.state.usage_timer.is_alive():
         app.state.usage_timer.cancel()
         app.state.usage_timer = None
-    elif app.state.usage_timer:
-        logger.info("定时检查使用明细任务已停止（已完成或已取消）。")
-    else:
-        logger.info("没有正在运行的定时检查使用明细任务。")
-
+    elif app.state.usage_timer: # Timer exists but not alive (already finished/cancelled)
+        app.state.usage_timer = None # Clear it
+    # else: No timer was running or set
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state = AppState()
-    
-    if app.state.current_token:
-        success, message = app.state.leigod_obj.update_token(app.state.current_token)
+async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoid conflict
+    app_instance.state = AppState()
+    state = app_instance.state # Use local variable for convenience
+
+    if state.current_token:
+        success, message = state.leigod_obj.update_token(state.current_token)
         if success:
-            account_info = app.state.leigod_obj.get_account_info()
-            if account_info[0]:
-                app.state.status_message = f"Token 初始化成功！账号状态: {account_info[1]['pause_status']}"
-                app.state.nickname = account_info[1]['nickname']
-                # 初始加载时也尝试获取使用记录
-                success_usage, msg_usage, _, full_data_usage = app.state.leigod_obj.get_usage_details_and_full_data()
+            account_info_tuple = state.leigod_obj.get_account_info()
+            if account_info_tuple[0]:
+                account_data = account_info_tuple[1]
+                state.status_message = f"Token 初始化成功！账号状态: {account_data.get('pause_status', '未知')}"
+                state.nickname = account_data.get('nickname', '')
+                
+                # Initialize is_last_known_state_paused
+                if 'pause_status_id' in account_data:
+                    state.is_last_known_state_paused = (account_data['pause_status_id'] == 1)
+                    logger.info(f"Lifespan: 初始暂停状态根据 account_info 设置为: {state.is_last_known_state_paused} (ID: {account_data['pause_status_id']})")
+                else:
+                    # Fallback: Try to infer from initial usage details
+                    s_usage, m_usage, _, fd_usage = state.leigod_obj.get_usage_details_and_full_data()
+                    if s_usage:
+                        if "已暂停状态" in m_usage: state.is_last_known_state_paused = True
+                        elif "未暂停状态" in m_usage: state.is_last_known_state_paused = False
+                        else: state.is_last_known_state_paused = None
+                        logger.info(f"Lifespan: 初始暂停状态根据 usage_details 设置为: {state.is_last_known_state_paused} (消息: '{m_usage}')")
+                    else:
+                        state.is_last_known_state_paused = None
+                        logger.warning(f"Lifespan: 获取初始使用明细失败 ({m_usage})，无法确定初始暂停状态。")
+                
+                success_usage, msg_usage, _, full_data_usage = state.leigod_obj.get_usage_details_and_full_data()
                 if success_usage and full_data_usage and 'list' in full_data_usage:
-                    app.state.usage_records = full_data_usage['list']
+                    state.usage_records = full_data_usage['list']
                 else:
                     logger.warning(f"初始使用明细获取失败: {msg_usage}")
             else:
-                app.state.status_message = f"Token 初始化成功，但获取账号信息失败: {account_info[1]}"
+                state.status_message = f"Token 初始化成功，但获取账号信息失败: {account_info_tuple[1]}"
+                state.is_last_known_state_paused = None
+                logger.error(f"Lifespan: 获取账号信息失败, 初始暂停状态未确定: {account_info_tuple[1]}")
         else:
-            app.state.status_message = f"Token 初始化失败: {message}"
+            state.status_message = f"Token 初始化失败: {message}"
+            state.is_last_known_state_paused = None
+            logger.error(f"Lifespan: Token 初始化失败, 初始暂停状态未确定: {message}")
     else:
-        app.state.status_message = "当前token为空，请更新token。"
+        state.status_message = "当前token为空，请更新token。"
+        state.is_last_known_state_paused = None
+        logger.info("Lifespan: Token 为空, 初始暂停状态未确定。")
 
-    logger.info(app.state.status_message)
+    logger.info(f"Lifespan: 服务状态: {state.status_message}, 初始暂停检测状态: {state.is_last_known_state_paused}")
     start_usage_timer()
     yield
     stop_usage_timer()
 
-app = FastAPI(lifespan=lifespan) # 将 lifespan 传递给 FastAPI 实例
+app = FastAPI(lifespan=lifespan)
+templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page(request: Request):
     state = request.app.state
     
-    # 刷新页面时，也确保 usage_records 是最新的
     if state.current_token:
-        success_usage, msg_usage, duration_minutes, full_data_usage = state.leigod_obj.get_usage_details_and_full_data()
-        if success_usage and full_data_usage and 'list' in full_data_usage:
-            state.usage_records = full_data_usage['list']
-            # 如果当前状态消息不是错误，则更新为最新的使用状态
-            if full_data_usage['list'] and full_data_usage['list'][0].get('pause_time') is None:
-                state.status_message = msg_usage
+        success_usage, msg_usage, _, full_data_usage = state.leigod_obj.get_usage_details_and_full_data()
+        if success_usage:
+            if full_data_usage and 'list' in full_data_usage:
+                state.usage_records = full_data_usage['list']
             else:
-                state.status_message = "当前账号处于已暂停状态。"
+                state.usage_records = [] # No list data even if call was success
+
+            # Update status message based on latest usage details if not an error message already
+            if not ("失败" in state.status_message or "错误" in state.status_message): # Avoid overwriting error messages
+                if "已暂停状态" in msg_usage:
+                    state.status_message = "当前账号处于已暂停状态。"
+                elif "未暂停状态" in msg_usage:
+                     state.status_message = msg_usage # e.g., "当前账号处于未暂停状态，已持续 X 分钟。"
+                # else, keep existing status_message if usage message is ambiguous for main page display
         else:
-            state.status_message = msg_usage # 如果获取使用明细失败，更新状态消息
+            state.status_message = msg_usage # Reflect error from get_usage_details
             state.usage_records = []
     else:
         state.usage_records = []
-        state.status_message = "当前token为空，请更新token。" # 确保token为空时状态消息正确
+        state.status_message = "当前token为空，请更新token。"
 
-    # --- 修改这里，传递脱敏后的 Token ---
     masked_token_display = mask_token(state.current_token) if state.current_token else '未设置'
 
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "current_token": masked_token_display, # 使用脱敏后的 Token
+        "current_token": masked_token_display,
         "nickname": state.nickname,
         "status_message": state.status_message,
         "last_update_time": state.get_current_time(), 
@@ -179,51 +259,72 @@ async def home_page(request: Request):
 @app.post("/update-token", response_class=RedirectResponse)
 async def update_token(request: Request, token: str = Form(...)):
     state = request.app.state
-    state.current_token = token
-    logger.info(f"收到新 Token {mask_token(token)}")
+    state.current_token = token # Store full token in state
+    logger.info(f"收到新 Token {mask_token(token)}") # Log masked token
 
     if token:
         success, message = state.leigod_obj.update_token(token)
         if success:
-            account_info = state.leigod_obj.get_account_info()
-            if account_info[0]:
-                state.status_message = f"Token 更新成功！账号状态: {account_info[1]['pause_status']}"
-                state.nickname = account_info[1]['nickname']
-                logger.info(f"Token 更新成功，账号昵称: {state.nickname}")
-                start_usage_timer() # 成功更新 Token 后启动定时器
-                # 更新 token 后也立即获取使用记录
-                success_usage, msg_usage, duration_minutes, full_data_usage = state.leigod_obj.get_usage_details_and_full_data()
-                if success_usage and full_data_usage and 'list' in full_data_usage:
-                    state.usage_records = full_data_usage['list']
-                    if full_data_usage['list'] and full_data_usage['list'][0].get('pause_time') is None:
-                        state.status_message = f"Token 更新成功！ {msg_usage} 分钟。"
-                        logger.info(f"Token 更新后，当前账号状态: {msg_usage}")
+            account_info_tuple = state.leigod_obj.get_account_info()
+            if account_info_tuple[0]:
+                account_data = account_info_tuple[1]
+                state.nickname = account_data.get('nickname', '')
+                
+                # Update is_last_known_state_paused
+                if 'pause_status_id' in account_data:
+                    state.is_last_known_state_paused = (account_data['pause_status_id'] == 1)
+                    logger.info(f"Token Update: 暂停状态根据 account_info 设置为: {state.is_last_known_state_paused} (ID: {account_data['pause_status_id']})")
+                else:
+                    # Fallback if pause_status_id is missing
+                    s_usage, m_usage, _, _ = state.leigod_obj.get_usage_details_and_full_data()
+                    if s_usage:
+                        if "已暂停状态" in m_usage: state.is_last_known_state_paused = True
+                        elif "未暂停状态" in m_usage: state.is_last_known_state_paused = False
+                        else: state.is_last_known_state_paused = None
+                        logger.info(f"Token Update: 暂停状态根据 usage_details 设置为: {state.is_last_known_state_paused} (消息: '{m_usage}')")
                     else:
-                        state.status_message = "Token 更新成功！当前账号处于已暂停状态。"
-                        logger.info("Token 更新后，当前账号处于已暂停状态。")
+                        state.is_last_known_state_paused = None
+                        logger.warning(f"Token Update: 获取使用明细失败 ({m_usage})，无法确定暂停状态。")
+
+                # Update status message and usage records
+                s_usage, m_usage, dur_min, fd_usage = state.leigod_obj.get_usage_details_and_full_data()
+                if s_usage:
+                    state.usage_records = fd_usage.get('list', [])
+                    if "已暂停状态" in m_usage:
+                        state.status_message = f"Token 更新成功！当前账号处于已暂停状态。"
+                    elif "未暂停状态" in m_usage:
+                        state.status_message = f"Token 更新成功！{m_usage}"
+                    else: # Ambiguous or other message
+                        state.status_message = f"Token 更新成功！账号状态: {account_data.get('pause_status', '未知')}. 使用明细: {m_usage}"
+                    logger.info(f"Token 更新后，状态: {state.status_message}")
                 else:
                     state.usage_records = []
-                    state.status_message = f"Token 更新成功，但获取使用明细失败: {msg_usage}"
-                    logger.warning(f"Token 更新成功，但获取使用明细失败: {msg_usage}")
+                    state.status_message = f"Token 更新成功！但获取使用明细失败: {m_usage}"
+                    logger.warning(f"Token 更新成功，但获取使用明细失败: {m_usage}")
+                
+                start_usage_timer()
             else:
-                state.status_message = f"Token 更新成功，但获取账号信息失败: {account_info[1]}"
+                state.status_message = f"Token 更新成功，但获取账号信息失败: {account_info_tuple[1]}"
                 state.nickname = ""
-                stop_usage_timer() # 获取账号信息失败，停止定时器
-                state.usage_records = [] # 清空记录
-                logger.error(f"Token 更新成功，但获取账号信息失败: {account_info[1]}")
+                state.is_last_known_state_paused = None
+                stop_usage_timer()
+                state.usage_records = []
+                logger.error(f"Token 更新成功，但获取账号信息失败: {account_info_tuple[1]}")
         else:
             state.status_message = f"Token 更新失败: {message}"
             state.nickname = ""
-            stop_usage_timer() # Token 更新失败，停止定时器
-            state.usage_records = [] # 清空记录
+            state.is_last_known_state_paused = None
+            stop_usage_timer()
+            state.usage_records = []
             logger.error(f"Token 更新失败: {message}")
-    else:
+    else: # Token is empty
         state.nickname = ""
         state.status_message = "Token 为空，未能更新。"
-        state.leigod_obj.update_token("") # 清空 legod 实例中的 token
-        stop_usage_timer() # Token 为空，停止定时器
-        state.usage_records = [] # 清空记录
-        logger.warning("Token 为空，未能更新。")
+        state.leigod_obj.update_token("")
+        state.is_last_known_state_paused = None
+        stop_usage_timer()
+        state.usage_records = []
+        logger.warning("Token 为空，未能更新，定时任务已停止。")
 
     state.last_update_time = state.get_current_time()
     return RedirectResponse("/", status_code=303)
@@ -235,42 +336,45 @@ async def pause_acceleration(request: Request):
     
     if not state.current_token:
         state.status_message = "当前没有有效的Token，请先更新Token。"
-        stop_usage_timer()
-        state.usage_records = [] # 清空记录
+        # state.is_last_known_state_paused remains unchanged or could be set to None
+        state.usage_records = []
         logger.warning("暂停加速请求：Token 无效。")
     else:
-        # 暂停前先检查Token是否有效，防止过期Token反复尝试
-        success_check_login, msg_check_login = state.leigod_obj.update_token(state.current_token)
+        success_check_login, msg_check_login = state.leigod_obj.update_token(state.current_token) # Re-validate token
         if not success_check_login:
             state.status_message = f"Token 已失效或登录失败，请重新登录: {msg_check_login}"
             state.nickname = ""
+            state.is_last_known_state_paused = None # Token invalid, state unknown
             stop_usage_timer()
-            state.usage_records = [] # 清空记录
+            state.usage_records = []
             logger.error(f"暂停加速请求：Token 已失效或登录失败: {msg_check_login}")
         else:
-            success_pause, msg_pause = state.leigod_obj.pause()
-            logger.info(f"暂停操作结果: {'成功' if success_pause else '失败'}, 消息: {msg_pause}")
+            # Refresh account info to correctly set nickname and initial pause state before manual pause
+            account_info_tuple = state.leigod_obj.get_account_info()
+            if account_info_tuple[0]:
+                state.nickname = account_info_tuple[1].get('nickname', '')
+                if 'pause_status_id' in account_info_tuple[1]:
+                     state.is_last_known_state_paused = (account_info_tuple[1]['pause_status_id'] == 1)
             
-            # 暂停操作后立即更新使用记录
-            success_usage, usage_message, duration_minutes, full_data_usage = state.leigod_obj.get_usage_details_and_full_data()
-            if success_usage:
-                if full_data_usage and 'list' in full_data_usage:
-                    state.usage_records = full_data_usage['list']
-                    # 暂停成功后，更新状态消息以反映最新的使用状态
-                    if full_data_usage['list'] and full_data_usage['list'][0].get('pause_time') is None:
-                        state.status_message = usage_message
-                        logger.info(f"暂停后，账号仍处于加速状态: {usage_message}")
-                    else:
-                        state.status_message = f"{msg_pause}！当前账号处于已暂停状态。"
-                        logger.info(f"暂停后，账号已成功暂停: {state.status_message}")
+            success_pause, msg_pause = state.leigod_obj.pause()
+            logger.info(f"手动暂停操作结果: {'成功' if success_pause else '失败'}, 消息: {msg_pause}")
+            
+            if success_pause:
+                state.is_last_known_state_paused = True # Successfully paused
+            
+            s_usage, m_usage, _, fd_usage = state.leigod_obj.get_usage_details_and_full_data()
+            if s_usage:
+                state.usage_records = fd_usage.get('list', [])
+                if "已暂停状态" in m_usage: # Expected after successful pause
+                    state.status_message = f"{msg_pause} 当前账号处于已暂停状态。"
+                elif "未暂停状态" in m_usage: # Pause might have failed or not reflected yet
+                     state.status_message = f"{msg_pause} 但状态仍为: {m_usage}"
                 else:
-                    state.usage_records = [] # 没有数据
-                    state.status_message = f"{msg_pause}！但获取使用明细失败: {usage_message}" # 用使用明细接口返回的消息
-                    logger.warning(f"暂停后，获取使用明细失败: {usage_message}")
+                    state.status_message = f"{msg_pause} 使用明细: {m_usage}"
             else:
-                state.status_message = f"{msg_pause}！但获取使用明细失败: {usage_message}"
-                state.usage_records = [] # 清空记录
-                logger.error(f"暂停后，获取使用明细失败: {usage_message}")
+                state.usage_records = []
+                state.status_message = f"{msg_pause} 但获取使用明细失败: {m_usage}"
+                logger.error(f"手动暂停后，获取使用明细失败: {m_usage}")
 
     state.last_update_time = state.get_current_time()
     return RedirectResponse("/", status_code=303)
@@ -282,11 +386,12 @@ async def reset_state(request: Request):
     state.nickname = ""
     state.status_message = "状态已重置，请重新输入Token。"
     state.last_update_time = state.get_current_time()
-    state.usage_records = [] # 清空使用记录
-    state.leigod_obj.update_token("") # 清空 legod 实例中的 token
-    stop_usage_timer() # 重置状态，停止定时器
+    state.usage_records = []
+    state.leigod_obj.update_token("")
+    state.is_last_known_state_paused = None # Reset pause state
+    stop_usage_timer()
     logger.info("应用程序状态已重置。")
     return RedirectResponse("/", status_code=303)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning") # Changed log_level for uvicorn for more details if needed
