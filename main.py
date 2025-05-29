@@ -55,15 +55,12 @@ def check_usage_details_task():
 
     if success:
         print(f"定时任务：使用明细检查结果: {message}")
-        # 目前雷神加速器 API 访问在重庆正常。如果时间超过2分钟，尝试自动暂停。
-        if duration_minutes > 2:
-            print(f"定时任务：已持续 {duration_minutes:.2f} 分钟，超过2分钟，尝试暂停加速...")
-            state.leigod_obj.notify(f"账号已加速超过2分钟并尝试自动暂停: {message}") 
+        if duration_minutes > 3600:
+            state.leigod_obj.notify(f"账号已加速超过24小时并尝试自动暂停: {message}") 
             pause_success, pause_msg = state.leigod_obj.pause()
             print(f"定时任务：自动暂停{'成功' if pause_success else '失败'}: {pause_msg}")
-        elif duration_minutes > 1:
-            print(f"定时任务：已持续 {duration_minutes:.2f} 分钟，超过1分钟，发送通知...")
-            state.leigod_obj.notify(f"账号已加速超过1分钟: {message}")
+        elif duration_minutes > 1800:
+            state.leigod_obj.notify(f"账号已加速超过超过12小时: {message}")
         
         # 更新 usage_records
         if full_data and 'list' in full_data:
