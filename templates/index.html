@@ -1,21 +1,108 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{% block title %}Token 服务{% endblock %}</title>
+    <title>{% block title %}雷神加速器管理{% endblock %}</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .card { border: 1px solid #ddd; padding: 20px; margin: 20px 0; border-radius: 5px; }
-        .status { background-color: #f5f5f5; padding: 10px; margin: 10px 0; }
-        .history-item { padding: 5px; border-bottom: 1px solid #eee; }
-        .timestamp { color: #666; font-size: 0.9em; }
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            background-color: #f4f4f4; 
+            color: #333; 
+        }
+        h1, h2, h3 { 
+            color: #0056b3; 
+        }
+        .card { 
+            background-color: #fff; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+            margin-bottom: 20px; 
+            padding: 20px; 
+        }
+        .card-header { 
+            border-bottom: 1px solid #eee; 
+            padding-bottom: 10px; 
+            margin-bottom: 15px; 
+        }
+        .card-header h3 { 
+            margin: 0; 
+            color: #0056b3; 
+        }
+        .card-body p { 
+            margin: 5px 0; 
+        }
+        .token { 
+            font-family: 'Courier New', monospace; 
+            background-color: #e9e9e9; 
+            padding: 2px 5px; 
+            border-radius: 4px; 
+            word-break: break-all; /* 防止token过长溢出 */
+        }
+        .status-message { 
+            font-weight: bold; 
+            color: #d9534f; /* 默认显示红色，可根据实际状态动态调整 */
+        }
+        input[type="text"] {
+            width: calc(100% - 120px); /* 调整宽度以适应按钮 */
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box; /* 包含padding和border在宽度内 */
+        }
+        button { 
+            background-color: #007bff; 
+            color: white; 
+            padding: 10px 15px; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            margin-right: 10px; /* 按钮间距 */
+        }
+        button:hover { 
+            background-color: #0056b3; 
+        }
+
+        .usage-table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-top: 15px; 
+        }
+        .usage-table th, .usage-table td { 
+            border: 1px solid #ddd; 
+            padding: 8px; 
+            text-align: left; 
+            vertical-align: top; /* 垂直对齐顶部 */
+        }
+        .usage-table th { 
+            background-color: #f2f2f2; 
+        }
+        .status-accelerating { 
+            color: green; 
+            font-weight: bold; 
+        }
+        .status-paused { 
+            color: #d9534f; 
+            font-weight: bold; 
+        }
         .refresh-timer { 
             text-align: center; 
-            margin-top: 15px; 
+            margin-top: 20px; 
             font-size: 0.9em; 
             color: #555; 
-            background-color: #e0f7fa; /* 浅蓝色背景 */
+            background-color: #e0f7fa; 
             padding: 8px;
             border-radius: 4px;
+            position: fixed; /* 固定在底部 */
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 100%;
+            max-width: 800px; /* 与主体内容宽度一致 */
+            box-sizing: border-box; /* 确保padding包含在宽度内 */
         }
     </style>
 </head>
@@ -25,70 +112,94 @@
     </header>
 
     <div>
-        1. 访问 <a href="https://www.leigod.com/" class="href">雷神加速器 - 官网</a>
+        <p>
+            <li> 访问 <a href="https://www.leigod.com/" target="_blank">雷神加速器 - 官网</a></li>
+            <li> 登录成功后，按下 <strong>F12</strong> 打开开发者工具，切换到 **控制台 (Console)** 标签页。</li>
+            <li> 在控制台中输入以下代码并回车，即可获取你的 `account_token`：</li>
+            <pre><code>JSON.parse(localStorage.getItem('account_token')).account_token</code></pre>
+        </p>
     </div>
-
-    <code></code>
     
     <main>
         <div class="card">
-            <h2>Token 更新</h2>
-            <form method="post" action="/update-token">
-                <label for="token">新 Token 值:</label>
-                <input type="text" id="token" name="token" required 
-                        placeholder="输入新 token..." value="">
-                <button type="submit">更新 Token</button>
-            </form>
-            
-            <div class="status">
-                <h3>当前状态</h3>
-                <p>Token 值: <code>{{ current_token }}</code></p>
-                <p>昵称: <span>{{ nickname }}</span></p>
-                <p>状态信息: <span>{{ status_message }}</span></p>
-                
-                <form method="post" action="/pause">
-                    <button type="submit">暂停加速</button>
+            <div class="card-header">
+                <h3>当前账号与操作</h3>
+            </div>
+            <div class="card-body">
+                <p><strong>当前 Token:</strong> <code class="token">{{ current_token if current_token else '未设置' }}</code></p>
+                <p><strong>昵称:</strong> <span>{{ nickname if nickname else 'N/A' }}</span></p>
+                <p><strong>状态信息:</strong> <span class="status-message">{{ status_message }}</span></p>
+                <p><strong>最后数据更新时间:</strong> {{ last_update_time or "从未更新" }}</p>
+
+                <form action="/update-token" method="post" style="margin-top: 15px;">
+                    <label for="token">新 Token 值:</label>
+                    <input type="text" id="token" name="token" required 
+                            placeholder="在这里输入您的雷神加速器Token" value="">
+                    <button type="submit">更新 Token</button>
                 </form>
+                
+                <div style="margin-top: 20px;">
+                    <form method="post" action="/pause" style="display: inline-block; margin-right: 10px;">
+                        <button type="submit" onclick="return confirm('确定要暂停加速吗？')">立即暂停加速</button>
+                    </form>
+                    <form method="post" action="/reset" style="display: inline-block;">
+                        <button type="submit" onclick="return confirm('确定要重置所有状态和Token吗？这将清空当前Token和所有本地记录，您需要重新输入Token。')">重置所有状态</button>
+                    </form>
+                </div>
             </div>
         </div>
 
         <div class="card">
-            <h2>历史记录</h2>
-            <div class="history-list">
-                {% if history %}
-                    {% for item in history %}
-                    <div class="history-item">
-                        <span class="timestamp">{{ item.time }}</span>
-                        <span class="token-value">{{ item.token }}</span>
-                    </div>
-                    {% endfor %}
+            <div class="card-header">
+                <h3>最近使用记录</h3>
+            </div>
+            <div class="card-body">
+                {% if usage_records %}
+                    <table class="usage-table">
+                        <thead>
+                            <tr>
+                                <th>操作类型</th>
+                                <th>加速开始时间</th>
+                                <th>暂停时间 (小时)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in usage_records %}
+                                <tr>
+                                    <td>
+                                        {% if record.pause_time and record.pause_time != record.recover_time %}
+                                            <span class="status-paused">已暂停</span>
+                                        {% else %}
+                                            <span class="status-accelerating">已加速</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ record.recover_time if record.recover_time else 'N/A' }}</td>
+                                    <td>{{ "%.2f" | format(record.duration / 3600) if record.duration is not none else 'N/A' }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 {% else %}
-                    <p>暂无历史记录</p>
+                    <p>暂无使用记录。请确保Token有效并刷新页面或等待下次定时更新。</p>
                 {% endif %}
             </div>
-            
-            <form method="post" action="/reset">
-                <button type="submit">重置状态</button>
-            </form>
         </div>
     </main>
     
     <footer>
-        <p>服务状态: <strong>{{ status_message }}</strong></p>
-        <p>最后更新: {{ last_update_time or "从未更新" }}</p>
         <div class="refresh-timer">
             页面将在 <span id="countdown"></span> 秒后刷新...
         </div>
     </footer>
 
     <script>
-        const REFRESH_INTERVAL = 5; // 刷新间隔，单位秒
+        const REFRESH_INTERVAL = 10; // 刷新间隔，单位秒 (调整为10秒更合理)
         let countdown = REFRESH_INTERVAL;
         const countdownElement = document.getElementById('countdown');
 
         function updateCountdown() {
             countdownElement.textContent = countdown;
-            if (countdown === 0) {
+            if (countdown <= 0) { // 修改为小于等于0，确保0秒时刷新
                 window.location.reload(); // 刷新页面
             } else {
                 countdown--;

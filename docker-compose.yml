@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  leigod-auto-pause:
+    image: yuanzhangzcc/leigod-auto-pause
+    container_name: leigod-auto-pause-service
+    ports:
+      - "8000:8000"
+    environment:
+      - token="YOUR_LEIGOD_TOKEN_HERE" 
+      - serverchan_sendkey="YOUR_SERVERCHAN_SENDKEY_HERE" 
+    restart: always
