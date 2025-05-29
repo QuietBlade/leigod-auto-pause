@@ -3,3 +3,4 @@ fastapi
 python-multipart
 jinja2
 serverchan-sdk
+load_dotenv
