@@ -34,9 +34,7 @@ class legod(object):
             print("环境变量 'serverchan_sendkey' 未设置，Server酱通知已禁用。")
 
         print(
-            """
-            雷神加速器自动暂停工具 当前版本：%s
-            """
+            """雷神加速器自动暂停工具 当前版本：%s"""
             % self.version
         )
 
